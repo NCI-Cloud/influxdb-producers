@@ -1,6 +1,14 @@
+#!/usr/bin/env python
+
+import json
+import pprint
+from influxdb import *
+import MySQLdb
+from MySQLdb import cursors
+
 hypervisors_query="""
 select
-        hypervisor_id,
+        id as hypervisor_id,
         hypervisor_hostname as hostname,
         host_ip as ip_address,
         vcpus as cpus,
@@ -80,20 +88,20 @@ from
 instances_query = """
 select
         project_id,
-        instance_id,
+        uuid as instance_id,
         display_name as name,
         vcpus,
         memory_mb as memory,
         root_gb as root,
         ephemeral_gb as ephemeral,
         instance_type_id as flavour,
-        created_at as created,
-        deleted_at as deleted,
+        unix_timestamp(created_at) as created,
+        unix_timestamp(deleted_at) as deleted,
         unix_timestamp(ifnull(deleted_at,now()))-unix_timestamp(created_at) as allocation_time,
         0 as wall_time,
         0 as cpu_time,
         if(deleted<>0,false,true) as active,
-	availability_zone
+	ifnull(availability_zone, '') as availability_zone
 from
         nova.instances;
 """
@@ -103,11 +111,11 @@ select
         project_id,
         display_name,
 	size,
-        created_at as created,
-        deleted_at as deleted,
+        unix_timestamp(created_at) as created,
+        unix_timestamp(deleted_at) as deleted,
         if(attach_status='attached',true,false) as attached,
         instance_uuid,
-	availability_zone
+	ifnull(availability_zone, '') as availability_zone
 from
         cinder.volumes;
 """
@@ -119,8 +127,8 @@ select
         size,
         status,
         is_public as public,
-        created_at as created,
-        deleted_at as deleted
+        unix_timestamp(created_at) as created,
+        unix_timestamp(deleted_at) as deleted
 from
         glance.images;
 """
@@ -190,3 +198,67 @@ static_series = {
 		}
 	}
 }
+
+# We have data sources which we query periodically, creating data points
+# accodring to the series definitions here.
+
+def database_query(db, query):
+        """
+        Run a query against the database and return the result set
+        """
+        cursor = db.cursor(cursors.DictCursor)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        return rows
+
+def assemble_data_point(measurement, row, time=None):
+        """
+        Take a result row from a DB query and assemble them into a data set for influxdb
+        """
+	# The data is in the form of dict containing a measurement field, a tags dict,
+	# a fields dict, and an optional time field. When the time isn't specified the
+	# data point will get the current time as seen by the server.
+	
+	tmp = { 'measurement': measurement,
+		'tags': {},
+		'fields': {}}
+	
+	# we use the relevant entry in the static_series dict to decide how to assemble
+	# this
+	tags = {}
+	if measurement in static_series:
+		tags = static_series[measurement]['tags']
+	for k in row.keys():
+		if k in tags:
+			tmp['tags'][k] = row[k]
+		tmp['fields'][k] = row[k]
+	if time:
+		tmp['time'] = time
+	return tmp
+
+def assemble_data_points(measurement, rows, time=None):
+	tmp = []
+	for r in rows:
+		tmp.append(assemble_data_point(measurement, r, time))
+	return tmp
+
+for k in static_series.keys():
+        for j in static_series[k].keys():
+                print k, j
+
+
+db = MySQLdb.connect(host='localhost', user='reporting-update', passwd='needs to be set', db='reporting')
+
+idb = InfluxDBClient(host='130.56.248.73', database='reporting')
+
+for k in static_series.keys():
+	data = database_query(db, static_series[k]['query'])
+	print k, len(data)
+	points = assemble_data_points(k, data)
+	print len(points)
+#"	pprint.pprint(points)
+
+	print "Writing %d points to database" % (len(points))
+	idb.write_points(points=points, batch_size=1000)
+
+
