@@ -9,6 +9,8 @@ from multiprocessing.pool import ThreadPool
 
 import requests
 
+from influxdb import *
+
 from keystoneclient.v2_0 import client
 from swift.common.ring import Ring
 
@@ -35,10 +37,17 @@ def fetch(tenant):
 			response = requests.head(url, timeout=5)
 			if response.status_code == 204:
 				return {
-					"containers" : int(response.headers["x-account-container-count"]),
-					"objects" : int(response.headers["x-account-object-count"]),
-					"bytes" : int(response.headers["x-account-bytes-used"]),
-					"quota" : int(response.headers["x-account-meta-quota-bytes"]) if "x-account-meta-quota-bytes" in response.headers else None
+					"measurement": "project-usage.object",
+					"fields": {
+						"projectid" : tenant,
+						"containers" : int(response.headers["x-account-container-count"]),
+						"objects" : int(response.headers["x-account-object-count"]),
+						"bytes" : int(response.headers["x-account-bytes-used"]),
+						"quota" : int(response.headers["x-account-meta-quota-bytes"]) if "x-account-meta-quota-bytes" in response.headers else None
+					},
+					"tags": {
+						"projectid": tenant
+					}
 				}
 			elif response.status_code == 404:
 				return None
@@ -56,5 +65,7 @@ report = {}
 for tenant, stats in zip(tenants, ThreadPool().map(fetch, tenants)):
 	report[tenant] = stats
 
-print json.dumps(report)
+idb = InfluxDBClient(host='130.56.248.73', database='reporting')
+
+idb.write_points(points=report, batch_size=1000) 	
 
